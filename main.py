@@ -1,41 +1,52 @@
-import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 
-from agent.correlator import correlate
-from agent.scorer import score_incident
-from agent.alerter import generate_alert
-from db.incidents import save_incident
+os.environ["GOOGLE_API_KEY"] = os.getenv("GEMINI_API_KEY")
 
-def run():
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai.types import Content, Part
+from agent.shrink_agent import shrink_agent
+
+async def run():
     print("\n🔍 Shrink Agent starting...\n")
 
-    print("Step 1: Correlating events across data sources...")
-    incidents = correlate()
-    print(f"         Found {len(incidents)} suspicious incident(s)\n")
+    session_service = InMemorySessionService()
+    runner = Runner(
+        agent=shrink_agent,
+        app_name="shrink_agent",
+        session_service=session_service
+    )
 
-    if not incidents:
-        print("✅ No anomalies detected. Store looks clean.")
-        return
+    session = await session_service.create_session(
+        app_name="shrink_agent",
+        user_id="loss_prevention"
+    )
 
-    print("Step 2: Scoring incidents...")
-    scored = [score_incident(inc) for inc in incidents]
+    message = Content(
+        role="user",
+        parts=[Part(text="Investigate STORE-184 for suspicious activity in the last 200 hours. Check all data sources and save any confirmed incidents.")]
+    )
 
-    print("Step 3: Generating Gemini alerts...")
-    alerted = [generate_alert(s) for s in scored]
+    print("Agent reasoning:\n" + "=" * 50)
 
-    print("Step 4: Saving to MongoDB...\n")
-    for inc in alerted:
-        incident_id = save_incident(inc)
-        print(f"🚨 ALERT SAVED")
-        print(f"   ID       : {incident_id}")
-        print(f"   Store    : {inc['store_id']}")
-        print(f"   Employee : {inc['employee_id']}")
-        print(f"   Risk     : {inc['risk_tier']} ({inc['score']}/100)")
-        print(f"   Alert    : {inc['alert_text'][:100]}...")
-        print()
+    async for event in runner.run_async(
+        user_id="loss_prevention",
+        session_id=session.id,
+        new_message=message
+    ):
+        if hasattr(event, 'content') and event.content:
+            for part in event.content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    print(f"\n🔧 Tool call: {part.function_call.name}")
+                elif hasattr(part, 'text') and part.text:
+                    print(part.text)
 
-    print(f"✅ Done. {len(alerted)} alert(s) saved. Open the dashboard to review.")
+        if event.is_final_response():
+            print("\n" + "=" * 50)
+            print("\n✅ Investigation complete.")
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())
